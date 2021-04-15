@@ -7,12 +7,9 @@
 #include <stdexcept>
 
 #ifdef USE_KINETO
-#include <pthread.h>
 #include <libkineto.h>
 
-#include <unistd.h>
-#include <sys/syscall.h>
-
+#ifndef _MSC_VER
 // TODO: TO be removed, once this properly works from libkineto
 // Literal copy-n-paste from third_party/kineto/libkineto/src/WeakSymbols.cpp
 extern "C" {
@@ -22,6 +19,7 @@ __attribute__((weak)) int acc_get_device_type() {
   throw std::runtime_error("Dummy implementation of acc_get_device_type is not supposed to be called!");
 }
 } // extern "C"
+#endif
 
 namespace torch { namespace autograd { namespace profiler {
 
@@ -37,17 +35,10 @@ inline int64_t getTimeUs() {
   return duration_cast<microseconds>(high_resolution_clock::now().time_since_epoch()).count();
 }
 
-// Getting the linux tid is expensive, so cache it.
-// Caching linux pids and tids is not advisable in the general case,
-// but this is only for profiling purposes and we don't need to handle
-// special cases during fork, clone etc.
-static thread_local pid_t cachedTid;
-
-
 std::string shapesToStr(const std::vector<std::vector<int64_t>>& shapes);
 std::string stacksToStr(const std::vector<std::string>& stacks);
 
-struct TORCH_API KinetoThreadLocalState : public ProfilerThreadLocalState {
+struct KinetoThreadLocalState : public ProfilerThreadLocalState {
   using ProfilerThreadLocalState::ProfilerThreadLocalState;
   ~KinetoThreadLocalState() override = default;
 
@@ -69,28 +60,8 @@ struct TORCH_API KinetoThreadLocalState : public ProfilerThreadLocalState {
     //   op.inputDims = shapesToStr(*ctx->shapes);
     // }
 
-    // Not setting atm
-#ifndef USE_KINETO_UPDATED
-    op.inputTypes = "[]";
-    op.arguments = "[]";
-    op.outputDims = "[]";
-    op.outputTypes = "[]";
-    op.inputNames = "[]";
-    op.outputNames = "[]";
-
-    op.pthreadId = pthread_self();
-#endif
-
-    if (!cachedTid) {
-      cachedTid = (pid_t)syscall(SYS_gettid);
-#ifdef USE_KINETO_UPDATED
-      libkineto::api().activityProfiler().recordThreadInfo(cachedTid, pthread_self());
-#endif
-    }
-
-    op.sysThreadId = cachedTid;
-
-    // setting both pthread and linux tid for Kineto
+    libkineto::api().activityProfiler().recordThreadInfo();
+    op.sysThreadId = libkineto::systemThreadId();
 
     {
       std::lock_guard<std::mutex> guard(state_mutex_);
@@ -148,23 +119,13 @@ struct TORCH_API KinetoThreadLocalState : public ProfilerThreadLocalState {
   void finalizeCPUTrace() {
     TORCH_INTERNAL_ASSERT(cpu_trace->activities.size() == kineto_events_.size());
     for (size_t idx = 0; idx < cpu_trace->activities.size(); ++idx) {
-#ifdef USE_KINETO_UPDATED
       if (kineto_events_[idx].hasShapes()) {
         cpu_trace->activities[idx].addMetadata("Input Dims", shapesToStr(kineto_events_[idx].shapes()));
       }
-#else
-      if (kineto_events_[idx].hasShapes()) {
-        cpu_trace->activities[idx].inputDims = shapesToStr(kineto_events_[idx].shapes());
-      } else {
-        cpu_trace->activities[idx].inputDims = "[]";
-      }
-#endif
+
       if (kineto_events_[idx].hasStack()) {
-#ifdef USE_KINETO_UPDATED
         cpu_trace->activities[idx].addMetadata("Call stack", stacksToStr(kineto_events_[idx].stack()));
-#else
-        cpu_trace->activities[idx].callStack = stacksToStr(kineto_events_[idx].stack());
-#endif
+
       }
     }
   }
